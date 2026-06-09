@@ -16,6 +16,15 @@ function isWhitelistedUser(userId) {
   return whitelist.has(Number(userId));
 }
 
+function normalizeCreatorType(value) {
+  const text = String(value || "").toLowerCase();
+
+  if (text.includes("group")) return "Group";
+  if (text.includes("user")) return "User";
+
+  return "";
+}
+
 async function getUniverseInfo(universeId) {
   const url = `https://games.roblox.com/v1/games?universeIds=${encodeURIComponent(universeId)}`;
 
@@ -26,15 +35,7 @@ async function getUniverseInfo(universeId) {
   }
 
   const data = await r.json();
-  const gameInfo = data?.data?.[0];
-
-  // Jangan throw 500 kalau universe tidak ketemu.
-  // Balikin null supaya response tetap rapi.
-  if (!gameInfo) {
-    return null;
-  }
-
-  return gameInfo;
+  return data?.data?.[0] || null;
 }
 
 async function getGroupOwnerUserId(groupId) {
@@ -47,8 +48,42 @@ async function getGroupOwnerUserId(groupId) {
   }
 
   const data = await r.json();
-
   return Number(data?.owner?.userId || 0);
+}
+
+async function checkByCreator(creatorType, creatorId) {
+  creatorType = normalizeCreatorType(creatorType);
+  creatorId = Number(creatorId || 0);
+
+  let allowed = false;
+  let groupId = 0;
+  let licenseOwnerUserId = 0;
+  let checkMode = "";
+
+  if (creatorType === "User") {
+    checkMode = "user_creator";
+    licenseOwnerUserId = creatorId;
+    allowed = isWhitelistedUser(creatorId);
+  }
+
+  if (creatorType === "Group") {
+    checkMode = "group_owner";
+    groupId = creatorId;
+
+    const ownerUserId = await getGroupOwnerUserId(groupId);
+
+    licenseOwnerUserId = ownerUserId;
+    allowed = isWhitelistedUser(ownerUserId);
+  }
+
+  return {
+    allowed,
+    checkMode,
+    creatorType,
+    creatorId,
+    groupId,
+    licenseOwnerUserId
+  };
 }
 
 export default async function handler(req, res) {
@@ -75,75 +110,57 @@ export default async function handler(req, res) {
     const universeId = Number(body.universeId || 0);
     const placeId = Number(body.placeId || 0);
 
-    if (!universeId || universeId <= 0) {
+    let source = "roblox_universe_api";
+    let creatorType = "";
+    let creatorId = 0;
+
+    const gameInfo = universeId > 0 ? await getUniverseInfo(universeId) : null;
+
+    if (gameInfo) {
+      const creator = gameInfo.creator || {};
+
+      creatorType = normalizeCreatorType(creator.type);
+      creatorId = Number(creator.id || 0);
+    } else {
+      // Fallback untuk Roblox Studio.
+      // Kalau universe belum kebaca oleh Roblox API, tetap cek dari creatorId + creatorType yang dikirim server Roblox.
+      source = "studio_payload_fallback";
+
+      creatorType = normalizeCreatorType(body.creatorType);
+      creatorId = Number(body.creatorId || 0);
+    }
+
+    if (!creatorType || creatorId <= 0) {
       return json(res, 200, {
         allowed: false,
-        reason: "invalid_universe_id",
+        reason: "invalid_creator_data",
+
+        source,
         universeId,
-        placeId
+        placeId,
+
+        creatorType,
+        creatorId
       });
     }
 
-    const gameInfo = await getUniverseInfo(universeId);
-
-    if (!gameInfo) {
-      return json(res, 200, {
-        allowed: false,
-        reason: "universe_not_found",
-        universeId,
-        placeId
-      });
-    }
-
-    const creator = gameInfo.creator || {};
-    const creatorType = String(creator.type || "");
-    const creatorId = Number(creator.id || 0);
-
-    let allowed = false;
-    let groupId = 0;
-    let licenseOwnerUserId = 0;
-    let checkMode = "";
-
-    // ===============================
-    // MAP OWNER = USER
-    // Cek langsung UserId creator map
-    // ===============================
-    if (creatorType === "User") {
-      checkMode = "user_creator";
-
-      licenseOwnerUserId = creatorId;
-      allowed = isWhitelistedUser(creatorId);
-    }
-
-    // ===============================
-    // MAP OWNER = GROUP
-    // Cek UserId owner group
-    // ===============================
-    if (creatorType === "Group") {
-      checkMode = "group_owner";
-
-      groupId = creatorId;
-
-      const ownerUserId = await getGroupOwnerUserId(groupId);
-
-      licenseOwnerUserId = ownerUserId;
-      allowed = isWhitelistedUser(ownerUserId);
-    }
+    const result = await checkByCreator(creatorType, creatorId);
 
     return json(res, 200, {
-      allowed,
-      reason: allowed ? "ok" : "not_whitelisted",
+      allowed: result.allowed,
+      reason: result.allowed ? "ok" : "not_whitelisted",
 
-      checkMode,
+      source,
+      checkMode: result.checkMode,
 
       universeId,
       placeId,
 
-      creatorType,
-      creatorId,
+      creatorType: result.creatorType,
+      creatorId: result.creatorId,
 
-      groupId,
-      licenseOwnerUserId
+      groupId: result.groupId,
+      licenseOwnerUserId: result.licenseOwnerUserId
     });
 
   } catch (err) {
