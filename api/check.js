@@ -114,18 +114,22 @@ export default async function handler(req, res) {
     let creatorType = "";
     let creatorId = 0;
 
-    const gameInfo = universeId > 0 ? await getUniverseInfo(universeId) : null;
-
+    const gameInfo = universeId > 0
+      ? await getUniverseInfo(universeId)
+      : null;
+    
     if (gameInfo) {
       const creator = gameInfo.creator || {};
-
+    
       creatorType = normalizeCreatorType(creator.type);
       creatorId = Number(creator.id || 0);
-    } else {
-      // Fallback untuk Roblox Studio.
-      // Kalau universe belum kebaca oleh Roblox API, tetap cek dari creatorId + creatorType yang dikirim server Roblox.
-      source = "studio_payload_fallback";
-
+    }
+    
+    // Map private kadang menghasilkan creatorId 0.
+    // Gunakan data yang dikirim langsung oleh server Roblox.
+    if (!creatorType || creatorId <= 0) {
+      source = "roblox_server_payload_fallback";
+    
       creatorType = normalizeCreatorType(body.creatorType);
       creatorId = Number(body.creatorId || 0);
     }
